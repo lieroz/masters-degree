@@ -3,9 +3,12 @@
 
 #include <cassert>
 #include <cstring>
+#include <climits>
 #include <string>
 #include <string_view>
 #include <atomic>
+
+inline constexpr uint64_t pageSize = 4096;
 
 class SpinLock
 {
@@ -63,27 +66,24 @@ std::string systemError(std::string_view message)
     return std::string(message) + " failed : " + std::strerror(errno);
 }
 
-uint64_t roundUpToNextPowerOf2(uint64_t value)
+template<typename T,
+    typename = std::enable_if_t<std::is_integral_v<T>>,
+    typename = std::enable_if_t<std::is_unsigned_v<T>>>
+constexpr T roundUpToNextPowerOf2(T value, uint64_t maxb = sizeof(T) * CHAR_BIT, uint64_t curb = 1)
 {
-    value--;
-    value |= value >> 1;
-    value |= value >> 2;
-    value |= value >> 4;
-    value |= value >> 8;
-    value |= value >> 16;
-    value |= value >> 32;
-    value++;
-    return value;
+    return maxb <= curb
+               ? value
+               : roundUpToNextPowerOf2(((value - 1) | ((value - 1) >> curb)) + 1, maxb, curb << 1);
 }
 
-template<typename T>
+template<uint64_t sizeClass>
 class MemoryQueue
 {
-public:
-    MemoryQueue() noexcept : pageSize(getpagesize())
-    {
-        sizeClass = roundUpToNextPowerOf2(sizeof(T));
+    static_assert(sizeClass >= pageSize, "Size class must be greater or equal to OS page size");
 
+public:
+    MemoryQueue() noexcept
+    {
         head = static_cast<Header *>(
             mmap(nullptr, pageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
         assert(head != MAP_FAILED && systemError("mmap").c_str());
@@ -101,9 +101,6 @@ private:
 
 private:
     SpinLock lock;
-
-    uint64_t pageSize;
-    uint64_t sizeClass;
 
     Header *head{nullptr};
     Header *tail{nullptr};
