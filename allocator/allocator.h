@@ -84,37 +84,27 @@ public:
     {
         sizeClass = roundUpToNextPowerOf2(sizeof(T));
 
-        tail = static_cast<Header *>(
+        head = static_cast<Header *>(
             mmap(nullptr, pageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
         assert(head != MAP_FAILED && systemError("mmap").c_str());
 
-        head = tail + pageSize / sizeof(Header) - 1;
-    }
-
-    bool push(const T &value) noexcept
-    {
-        LockGuard guard{lock};
-        return true;
-    }
-
-    bool pop(T &value) noexcept
-    {
-        LockGuard guard{lock};
-        return true;
+        tail = head + pageSize / sizeof(Header) - 1;
     }
 
 private:
+    // Header size must be of power of 2
+    // to be equally divisible on system page size
+    // and can't be more than page size
     struct Header
     {
-        Header *next{nullptr};
     };
 
 private:
+    SpinLock lock;
+
     uint64_t pageSize;
     uint64_t sizeClass;
 
     Header *head{nullptr};
     Header *tail{nullptr};
-
-    SpinLock lock;
 };
