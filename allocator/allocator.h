@@ -69,29 +69,34 @@ std::string systemError(std::string_view message)
     return std::string(message) + " failed : " + std::strerror(errno);
 }
 
-template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-constexpr T roundUpToNextPowerOf2(T value, uint64_t maxb = sizeof(T) * CHAR_BIT, uint64_t curb = 1)
+constexpr bool isDivisibleByPageSize(uint64_t value)
 {
-    return maxb <= curb
-               ? value
-               : roundUpToNextPowerOf2(((value - 1) | ((value - 1) >> curb)) + 1, maxb, curb << 1);
+    return value % pageSize == 0;
 }
 
-template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-constexpr bool isPowerOf2(T value)
+constexpr uint64_t getNextNearestDivisibleByPageSize(uint64_t value)
 {
-    if ((value & (value - 1)))
-    {
-        return false;
-    }
-    return true;
+    return ((value / pageSize) + 1) * pageSize;
+}
+
+void *mmapImpl(uint64_t size)
+{
+    void *mmapedAddress =
+        mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(mmapedAddress != MAP_FAILED && systemError("mmap").c_str());
+    return mmapedAddress;
+}
+
+void munmapImpl(uintptr_t *mmapedAddress, uint64_t size)
+{
+    assert(munmap(static_cast<void *>(mmapedAddress), size) != -1 && systemError("munmap").c_str());
 }
 
 template<uint64_t sizeClass>
 class MemoryRegistry
 {
-    static_assert(sizeClass >= pageSize && isPowerOf2(sizeClass),
-        "Size class must be greater or equal to OS page size and be power of 2");
+    static_assert(sizeClass >= pageSize && isDivisibleByPageSize(sizeClass),
+        "Size class must be greater or equal to OS page size and be divisible on page size");
 
 public:
     MemoryRegistry() noexcept
@@ -124,7 +129,9 @@ public:
 
         if (currentFreeCell == metadataPages)
         {
-            dataPointer = mmapImpl(sizeClass);
+            uint64_t *mmapedAddress = static_cast<uint64_t *>(mmapImpl(pageSize + sizeClass));
+            *mmapedAddress = sizeClass;
+            dataPointer = static_cast<void *>(mmapedAddress + pageSize / sizeof(uint64_t));
         }
         else
         {
@@ -141,25 +148,29 @@ public:
     }
 
 private:
-    void *mmapImpl(uint64_t size)
-    {
-        void *mmapedAddress =
-            mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        assert(mmapedAddress != MAP_FAILED && systemError("mmap").c_str());
-        return mmapedAddress;
-    }
-
-    void munmapImpl(uintptr_t *mmapedAddress, uint64_t size)
-    {
-        assert(munmap(static_cast<void *>(mmapedAddress), size) != -1 &&
-               systemError("munmap").c_str());
-    }
-
-private:
     SpinLock lock;
 
     uintptr_t *metadataPages;
     uintptr_t *currentMetadataPage;
     uintptr_t *currentFreeCell;
     size_t metadataLimit;
+};
+
+template<uint16_t sizeClass>
+class SmallMemoryRegistry
+{
+    static_assert(sizeClass < pageSize && isPowerOf2(sizeClass),
+        "Size class must be less than OS page size and be power of 2");
+
+public:
+    SmallMemoryRegistry() noexcept
+        : memoryMaps(static_cast<uintptr_t *>(pageSize)), currentAllocationPage(memoryMaps)
+    {
+    }
+
+    void pop(void *&dataPointer) noexcept {}
+
+private:
+    uintptr_t *memoryMaps;
+    uintptr_t *currentAllocationPage;
 };
