@@ -50,17 +50,27 @@ template<typename Lock>
 class LockGuard
 {
 public:
-    LockGuard(Lock &lock) : lock_(lock)
+    LockGuard(Lock &lock) noexcept : lock_(lock)
     {
         lock_.lock();
     }
 
-    ~LockGuard()
+    ~LockGuard() noexcept
     {
+        if (locked)
+        {
+            lock_.unlock();
+        }
+    }
+
+    void unlock() noexcept
+    {
+        locked = false;
         lock_.unlock();
     }
 
 private:
+    bool locked{true};
     Lock &lock_;
 };
 
@@ -87,90 +97,73 @@ void *mmapImpl(uint64_t size)
     return mmapedAddress;
 }
 
-void munmapImpl(uintptr_t *mmapedAddress, uint64_t size)
-{
-    assert(munmap(static_cast<void *>(mmapedAddress), size) != -1 && systemError("munmap").c_str());
-}
-
 template<uint64_t sizeClass>
-class MemoryRegistry
+class MemoryQueue
 {
     static_assert(sizeClass >= pageSize && isDivisibleByPageSize(sizeClass),
         "Size class must be greater or equal to OS page size and be divisible on page size");
 
 public:
-    MemoryRegistry() noexcept
-        : metadataPages(static_cast<uintptr_t *>(mmapImpl(pageSize))),
-          currentMetadataPage(metadataPages),
-          currentFreeCell(metadataPages),
-          metadataLimit(pageSize / sizeof(uintptr_t))
-    {
-    }
+    MemoryQueue() noexcept {}
 
     void push(void *dataPointer) noexcept
     {
-        assert(dataPointer != nullptr);
-        LockGuard guard{lock};
+        assert(dataPointer != nullptr && isDivisibleByPageSize(dataPointer));
+        *(static_cast<uint64_t *>(dataPointer) - 1) = 0;
 
-        if (currentFreeCell + 1 == currentMetadataPage + metadataLimit)
+        LockGuard guard{lock_};
+
+        if (tail == nullptr)
         {
-            currentFreeCell = static_cast<uintptr_t *>(mmapImpl(pageSize));
-            currentMetadataPage[metadataLimit - 1] = reinterpret_cast<uintptr_t>(currentFreeCell);
-            *currentFreeCell = reinterpret_cast<uintptr_t>(currentMetadataPage);
-            currentMetadataPage = ++currentFreeCell;
+            tail = dataPointer;
+            head = tail;
         }
-
-        *(currentFreeCell++) = reinterpret_cast<uintptr_t>(dataPointer);
+        else
+        {
+            *(static_cast<uint64_t *>(tail) - 1) = reinterpret_cast<uint64_t>(dataPointer);
+            tail = dataPointer;
+        }
     }
 
     void pop(void *&dataPointer) noexcept
     {
-        LockGuard guard{lock};
+        LockGuard guard{lock_};
 
-        if (currentFreeCell == metadataPages)
+        if (head == nullptr)
         {
+            guard.unlock();
+
             uint64_t *mmapedAddress = static_cast<uint64_t *>(mmapImpl(pageSize + sizeClass));
             *mmapedAddress = sizeClass;
             dataPointer = static_cast<void *>(mmapedAddress + pageSize / sizeof(uint64_t));
         }
         else
         {
-            dataPointer = static_cast<void *>(--currentFreeCell);
-            if (currentFreeCell - 1 == currentMetadataPage && currentFreeCell != metadataPages)
+            dataPointer = head;
+            if (uint64_t next = *(static_cast<uint64_t *>(head) - 1); next == 0)
             {
-                uintptr_t *previousMetadataPage =
-                    reinterpret_cast<uintptr_t *>(*currentMetadataPage);
-                currentFreeCell = previousMetadataPage + metadataLimit - 1;
-                munmapImpl(currentMetadataPage, pageSize);
-                currentMetadataPage = previousMetadataPage;
+                head = nullptr;
+                tail = nullptr;
+            }
+            else
+            {
+                head = reinterpret_cast<void *>(next);
             }
         }
     }
 
 private:
-    SpinLock lock;
+    SpinLock lock_;
 
-    uintptr_t *metadataPages;
-    uintptr_t *currentMetadataPage;
-    uintptr_t *currentFreeCell;
-    size_t metadataLimit;
+    void *head{nullptr};
+    void *tail{nullptr};
 };
 
 template<uint16_t sizeClass>
 class SmallMemoryRegistry
 {
-    static_assert(sizeClass < pageSize && isPowerOf2(sizeClass),
-        "Size class must be less than OS page size and be power of 2");
+    static_assert(sizeClass < pageSize, "Size class must be less than OS page size");
 
 public:
-    SmallMemoryRegistry() noexcept
-        : memoryMaps(static_cast<uintptr_t *>(pageSize)), currentAllocationPage(memoryMaps)
-    {
-    }
-
-    void pop(void *&dataPointer) noexcept {}
-
 private:
-    uintptr_t *memoryMaps;
-    uintptr_t *currentAllocationPage;
 };
