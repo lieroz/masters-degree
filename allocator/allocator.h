@@ -8,7 +8,10 @@
 #include <string_view>
 #include <atomic>
 
-inline constexpr uint64_t pageSize = 4096;
+inline constexpr uint64_t pageSize = 1 << 12;  // 4KB
+
+inline constexpr uint64_t registryRangeBegin = 1 << 12;  // 4KB
+inline constexpr uint64_t registryRangeEnd = 1 << 21;    // 2MB
 
 class SpinLock
 {
@@ -74,32 +77,89 @@ constexpr T roundUpToNextPowerOf2(T value, uint64_t maxb = sizeof(T) * CHAR_BIT,
                : roundUpToNextPowerOf2(((value - 1) | ((value - 1) >> curb)) + 1, maxb, curb << 1);
 }
 
-template<uint64_t sizeClass>
-class MemoryQueue
+template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+constexpr bool isPowerOf2(T value)
 {
-    static_assert(sizeClass >= pageSize, "Size class must be greater or equal to OS page size");
+    if ((value & (value - 1)))
+    {
+        return false;
+    }
+    return true;
+}
+
+template<uint64_t sizeClass>
+class MemoryRegistry
+{
+    static_assert(sizeClass >= pageSize && isPowerOf2(sizeClass),
+        "Size class must be greater or equal to OS page size and be power of 2");
 
 public:
-    MemoryQueue() noexcept
+    MemoryRegistry() noexcept
+        : metadataPages(static_cast<uintptr_t *>(mmapImpl(pageSize))),
+          currentMetadataPage(metadataPages),
+          currentFreeCell(metadataPages),
+          metadataLimit(pageSize / sizeof(uintptr_t))
     {
-        head = static_cast<Header *>(
-            mmap(nullptr, pageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-        assert(head != MAP_FAILED && systemError("mmap").c_str());
+    }
 
-        tail = head + pageSize / sizeof(Header) - 1;
+    void push(void *dataPointer) noexcept
+    {
+        assert(dataPointer != nullptr);
+        LockGuard guard{lock};
+
+        if (currentFreeCell + 1 == currentMetadataPage + metadataLimit)
+        {
+            currentFreeCell = static_cast<uintptr_t *>(mmapImpl(pageSize));
+            currentMetadataPage[metadataLimit - 1] = reinterpret_cast<uintptr_t>(currentFreeCell);
+            *currentFreeCell = reinterpret_cast<uintptr_t>(currentMetadataPage);
+            currentMetadataPage = ++currentFreeCell;
+        }
+
+        *(currentFreeCell++) = reinterpret_cast<uintptr_t>(dataPointer);
+    }
+
+    void pop(void *&dataPointer) noexcept
+    {
+        LockGuard guard{lock};
+
+        if (currentFreeCell == metadataPages)
+        {
+            dataPointer = mmapImpl(sizeClass);
+        }
+        else
+        {
+            dataPointer = static_cast<void *>(--currentFreeCell);
+            if (currentFreeCell - 1 == currentMetadataPage && currentFreeCell != metadataPages)
+            {
+                uintptr_t *previousMetadataPage =
+                    reinterpret_cast<uintptr_t *>(*currentMetadataPage);
+                currentFreeCell = previousMetadataPage + metadataLimit - 1;
+                munmapImpl(currentMetadataPage, pageSize);
+                currentMetadataPage = previousMetadataPage;
+            }
+        }
     }
 
 private:
-    // Header size must be of power of 2
-    // to be equally divisible on system page size
-    // and can't be more than page size
-    struct Header
+    void *mmapImpl(uint64_t size)
     {
-    };
+        void *mmapedAddress =
+            mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        assert(mmapedAddress != MAP_FAILED && systemError("mmap").c_str());
+        return mmapedAddress;
+    }
+
+    void munmapImpl(uintptr_t *mmapedAddress, uint64_t size)
+    {
+        assert(munmap(static_cast<void *>(mmapedAddress), size) != -1 &&
+               systemError("munmap").c_str());
+    }
 
 private:
     SpinLock lock;
 
-    Header *head{nullptr};
-    Header *tail{nullptr};
+    uintptr_t *metadataPages;
+    uintptr_t *currentMetadataPage;
+    uintptr_t *currentFreeCell;
+    size_t metadataLimit;
 };
