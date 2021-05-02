@@ -66,9 +66,7 @@ std::string systemError(std::string_view message)
     return std::string(message) + " failed : " + std::strerror(errno);
 }
 
-template<typename T,
-    typename = std::enable_if_t<std::is_integral_v<T>>,
-    typename = std::enable_if_t<std::is_unsigned_v<T>>>
+template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
 constexpr T roundUpToNextPowerOf2(T value, uint64_t maxb = sizeof(T) * CHAR_BIT, uint64_t curb = 1)
 {
     return maxb <= curb
