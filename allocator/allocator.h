@@ -8,10 +8,22 @@
 #include <string_view>
 #include <atomic>
 
+// ATTENTION: don't change these values
+// may break whole logic
 inline constexpr uint64_t pageSize = 1 << 12;  // 4KB
+inline constexpr uint64_t metadataLimit = pageSize / sizeof(uint64_t);  // 512 elements
+inline constexpr uint64_t largeObjectSizeLimit = 1 << 20;               // 1MB
 
-inline constexpr uint64_t registryRangeBegin = 1 << 12;  // 4KB
-inline constexpr uint64_t registryRangeEnd = 1 << 21;    // 2MB
+inline constexpr uint64_t smallObjectMask = static_cast<uint64_t>(1) << 63;
+inline constexpr uint64_t highestVirtualSpaceBit = 48;  // without PAE in 64-bit mode
+
+template<typename T>
+T *getWorkingAddress(T *value)
+{
+    static constexpr uint64_t workingAddressMask =
+        (static_cast<uint64_t>(1) << highestVirtualSpaceBit) - 1;  // 0xffffffffffff
+    return reinterpret_cast<T *>(reinterpret_cast<uint64_t>(value) & workingAddressMask);
+}
 
 class SpinLock
 {
@@ -79,9 +91,10 @@ std::string systemError(std::string_view message)
     return std::string(message) + " failed : " + std::strerror(errno);
 }
 
-constexpr bool isDivisibleByPageSize(uint64_t value)
+template<uint64_t size>
+constexpr bool isDivisibleBy(uint64_t value)
 {
-    return value % pageSize == 0;
+    return value % size == 0;
 }
 
 constexpr uint64_t getNextNearestDivisibleByPageSize(uint64_t value)
@@ -97,73 +110,72 @@ void *mmapImpl(uint64_t size)
     return mmapedAddress;
 }
 
-template<uint64_t sizeClass>
-class MemoryQueue
+void munmapImpl(void *mmapedAddress, uint64_t size)
 {
-    static_assert(sizeClass >= pageSize && isDivisibleByPageSize(sizeClass),
-        "Size class must be greater or equal to OS page size and be divisible on page size");
+    assert(munmap(mmapedAddress, size) != -1 && systemError("munmap").c_str());
+}
+
+template<uint64_t sizeClass>
+class MemoryRegistry
+{
+    static_assert(sizeClass >= pageSize && isDivisibleBy<pageSize>(sizeClass));
 
 public:
-    MemoryQueue() noexcept {}
+    MemoryRegistry() noexcept : metadata(static_cast<uint64_t *>(mmapImpl(pageSize)))
+    {
+        std::memset(metadata, 0, pageSize);
+    }
 
     void push(void *dataPointer) noexcept
     {
-        assert(dataPointer != nullptr && isDivisibleByPageSize(dataPointer));
-        *(static_cast<uint64_t *>(dataPointer) - 1) = 0;
-
+        dataPointer = getWorkingAddress(dataPointer);
         LockGuard guard{lock_};
 
-        if (tail == nullptr)
+        if (pushIndex != metadataLimit)
         {
-            tail = dataPointer;
-            head = tail;
+            metadata[pushIndex] = reinterpret_cast<uint64_t>(dataPointer);
+            popIndex = pushIndex++;
         }
         else
         {
-            *(static_cast<uint64_t *>(tail) - 1) = reinterpret_cast<uint64_t>(dataPointer);
-            tail = dataPointer;
+            guard.unlock();
+            munmapImpl(dataPointer, sizeClass);
         }
     }
 
     void pop(void *&dataPointer) noexcept
     {
-        LockGuard guard{lock_};
+        uint64_t mmapedAddress;
 
-        if (head == nullptr)
         {
-            guard.unlock();
+            LockGuard guard{lock_};
 
-            uint64_t *mmapedAddress = static_cast<uint64_t *>(mmapImpl(pageSize + sizeClass));
-            *mmapedAddress = sizeClass;
-            dataPointer = static_cast<void *>(mmapedAddress + pageSize / sizeof(uint64_t));
-        }
-        else
-        {
-            dataPointer = head;
-            if (uint64_t next = *(static_cast<uint64_t *>(head) - 1); next == 0)
+            if (popIndex == 0 && metadata[popIndex] == 0)
             {
-                head = nullptr;
-                tail = nullptr;
+                guard.unlock();
+                mmapedAddress = reinterpret_cast<uint64_t>(mmapImpl(sizeClass));
             }
             else
             {
-                head = reinterpret_cast<void *>(next);
+                pushIndex = popIndex;
+                mmapedAddress = metadata[popIndex];
+                metadata[popIndex] = 0;
+
+                if (popIndex != 0)
+                {
+                    --popIndex;
+                }
             }
         }
+
+        uint64_t bitsSizeClass = (sizeClass / pageSize) << highestVirtualSpaceBit;
+        dataPointer = reinterpret_cast<void *>(mmapedAddress | bitsSizeClass);
     }
 
 private:
     SpinLock lock_;
 
-    void *head{nullptr};
-    void *tail{nullptr};
-};
-
-template<uint16_t sizeClass>
-class SmallMemoryRegistry
-{
-    static_assert(sizeClass < pageSize, "Size class must be less than OS page size");
-
-public:
-private:
+    uint64_t *metadata;
+    uint64_t pushIndex{0};
+    uint64_t popIndex{0};
 };
