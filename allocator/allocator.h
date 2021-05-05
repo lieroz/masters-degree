@@ -116,12 +116,12 @@ void munmapImpl(void *mmapedAddress, uint64_t size)
 }
 
 template<uint64_t sizeClass>
-class MemoryRegistry
+class LargeObjectsRegistry
 {
     static_assert(sizeClass >= pageSize && isDivisibleBy<pageSize>(sizeClass));
 
 public:
-    MemoryRegistry() noexcept : metadata(static_cast<uint64_t *>(mmapImpl(pageSize)))
+    LargeObjectsRegistry() noexcept : metadata(static_cast<uint64_t *>(mmapImpl(pageSize)))
     {
         std::memset(metadata, 0, pageSize);
     }
@@ -168,8 +168,8 @@ public:
             }
         }
 
-        uint64_t bitsSizeClass = (sizeClass / pageSize) << highestVirtualSpaceBit;
-        dataPointer = reinterpret_cast<void *>(mmapedAddress | bitsSizeClass);
+        uint64_t controlBits = (sizeClass / pageSize) << highestVirtualSpaceBit;
+        dataPointer = reinterpret_cast<void *>(mmapedAddress | controlBits);
     }
 
 private:
@@ -178,4 +178,108 @@ private:
     uint64_t *metadata;
     uint64_t pushIndex{0};
     uint64_t popIndex{0};
+};
+
+template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+constexpr bool isPowerOf2(T value)
+{
+    if ((value & (value - 1)))
+    {
+        return false;
+    }
+    return true;
+}
+
+template<uint64_t sizeClass>
+class SmallObjectsRegistry
+{
+    static_assert(sizeClass <= pageSize / 2 && isPowerOf2(sizeClass));
+
+public:
+    SmallObjectsRegistry() noexcept : metadata(static_cast<uint64_t *>(mmapImpl(pageSize)))
+    {
+        std::memset(metadata, 0, pageSize);
+        std::memset(null, 0, sizeClass);
+    }
+
+    void push(void *dataPointer) noexcept
+    {
+        dataPointer = getWorkingAddress(dataPointer);
+        std::memset(dataPointer, 0, sizeClass);
+    }
+
+    bool pop(void *&dataPointer) noexcept
+    {
+        auto &&[cell, index] = findFreeCell(pageIndex);
+        // XXX: no free objects
+        // maybe add another metadata page here
+        // for queue like structure?
+        if (index == metadataLimit)
+        {
+            return false;
+        }
+
+        pageIndex = index;
+
+        if (cell == nullptr)
+        {
+            dataPointer = mmapImpl(pageSize);
+            metadata[pageIndex] = reinterpret_cast<uint64_t>(dataPointer);
+        }
+        else
+        {
+            dataPointer = cell;
+        }
+
+        std::memset(dataPointer, 0xff, sizeClass);
+        uint64_t controlBits = (sizeClass << highestVirtualSpaceBit) | smallObjectMask;
+        dataPointer =
+            reinterpret_cast<void *>(reinterpret_cast<uint64_t>(dataPointer) | controlBits);
+        return true;
+    }
+
+private:
+    std::pair<void *, uint64_t> findFreeCell(uint64_t hint) noexcept
+    {
+        uint64_t limit{hint};
+        for (; limit < metadataLimit && metadata[limit] != 0; ++limit)
+        {
+            if (void *cell = findFreeCellInPage(limit); cell != nullptr)
+            {
+                return {cell, limit};
+            }
+        }
+
+        for (uint64_t index{0}; index < metadataLimit && metadata[index] != 0; ++index)
+        {
+            if (void *cell = findFreeCellInPage(index); cell != nullptr)
+            {
+                return {cell, index};
+            }
+        }
+
+        return {nullptr, limit};
+    }
+
+    void *findFreeCellInPage(uint64_t index) noexcept
+    {
+        char *begin = reinterpret_cast<char *>(metadata[index]);
+        char *end = begin + pageSize;
+
+        for (; begin != end; begin += sizeClass)
+        {
+            if (!std::memcmp(null, begin, sizeClass))
+            {
+                return begin;
+            }
+        }
+
+        return nullptr;
+    }
+
+private:
+    uint64_t *metadata;
+    uint64_t pageIndex{0};
+
+    char null[sizeClass];
 };
