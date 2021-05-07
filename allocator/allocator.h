@@ -3,16 +3,21 @@
 
 #include <cassert>
 #include <cstring>
+#include <cerrno>
 #include <climits>
-#include <string>
-#include <string_view>
 #include <atomic>
+#include <array>
 
 // ATTENTION: don't change these values
 // may break whole logic
 inline constexpr uint64_t pageSize = 1 << 12;  // 4KB
 inline constexpr uint64_t metadataLimit = pageSize / sizeof(uint64_t);  // 512 elements
-inline constexpr uint64_t largeObjectSizeLimit = 1 << 20;               // 1MB
+
+inline constexpr uint64_t smallObjectsSizeStart = 1 << 3;   // 8
+inline constexpr uint64_t smallObjectsSizeLimit = 1 << 11;  // 2KB
+
+inline constexpr uint64_t largeObjectsSizeStart = 1 << 12;              // 4KB
+inline constexpr uint64_t largeObjectsSizeLimit = 1 << 20;              // 1MB
 
 inline constexpr uint64_t smallObjectMask = static_cast<uint64_t>(1) << 63;
 inline constexpr uint64_t highestVirtualSpaceBit = 48;  // without PAE in 64-bit mode
@@ -28,6 +33,14 @@ T *getWorkingAddress(T *value)
 class SpinLock
 {
 public:
+    SpinLock() noexcept = default;
+    SpinLock(const SpinLock &other) : lock_(other.lock_.load()) {}
+    SpinLock &operator=(const SpinLock &other)
+    {
+        lock_.store(other.lock_.load());
+        return *this;
+    }
+
     void lock() noexcept
     {
         for (;;)
@@ -86,9 +99,22 @@ private:
     Lock &lock_;
 };
 
-std::string systemError(std::string_view message)
+template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+constexpr T roundUpToNextPowerOf2(T value, uint64_t maxb = sizeof(T) * CHAR_BIT, uint64_t curb = 1)
 {
-    return std::string(message) + " failed : " + std::strerror(errno);
+    return maxb <= curb
+               ? value
+               : roundUpToNextPowerOf2(((value - 1) | ((value - 1) >> curb)) + 1, maxb, curb << 1);
+}
+
+template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+constexpr bool isPowerOf2(T value)
+{
+    if ((value & (value - 1)))
+    {
+        return false;
+    }
+    return true;
 }
 
 template<uint64_t size>
@@ -106,30 +132,30 @@ void *mmapImpl(uint64_t size)
 {
     void *mmapedAddress =
         mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    assert(mmapedAddress != MAP_FAILED && systemError("mmap").c_str());
+    assert(mmapedAddress != MAP_FAILED && std::strerror(errno));
     return mmapedAddress;
 }
 
 void munmapImpl(void *mmapedAddress, uint64_t size)
 {
-    assert(munmap(mmapedAddress, size) != -1 && systemError("munmap").c_str());
+    assert(munmap(mmapedAddress, size) != -1 && std::strerror(errno));
 }
 
-template<uint64_t sizeClass>
+// XXX: can be up to 268431360 bytes to encode in 16 bits
+// multiplied by page size
 class LargeObjectsRegistry
 {
-    static_assert(sizeClass >= pageSize && isDivisibleBy<pageSize>(sizeClass));
-
 public:
-    LargeObjectsRegistry() noexcept : metadata(static_cast<uint64_t *>(mmapImpl(pageSize)))
+    LargeObjectsRegistry() noexcept = default;
+    LargeObjectsRegistry(uint64_t size) noexcept : sizeClass(size)
     {
-        std::memset(metadata, 0, pageSize);
+        assert(sizeClass >= pageSize && isDivisibleBy<pageSize>(sizeClass));
     }
 
     void push(void *dataPointer) noexcept
     {
-        dataPointer = getWorkingAddress(dataPointer);
         LockGuard guard{lock_};
+        init();
 
         if (pushIndex != metadataLimit)
         {
@@ -145,34 +171,42 @@ public:
 
     void pop(void *&dataPointer) noexcept
     {
-        uint64_t mmapedAddress;
+        LockGuard guard{lock_};
+        init();
 
+        if (popIndex == 0 && metadata[popIndex] == 0)
         {
-            LockGuard guard{lock_};
+            guard.unlock();
+            dataPointer = mmapImpl(sizeClass);
+        }
+        else
+        {
+            pushIndex = popIndex;
+            dataPointer = reinterpret_cast<void *>(metadata[popIndex]);
+            metadata[popIndex] = 0;
 
-            if (popIndex == 0 && metadata[popIndex] == 0)
+            if (popIndex != 0)
             {
-                guard.unlock();
-                mmapedAddress = reinterpret_cast<uint64_t>(mmapImpl(sizeClass));
-            }
-            else
-            {
-                pushIndex = popIndex;
-                mmapedAddress = metadata[popIndex];
-                metadata[popIndex] = 0;
-
-                if (popIndex != 0)
-                {
-                    --popIndex;
-                }
+                --popIndex;
             }
         }
-
-        uint64_t controlBits = (sizeClass / pageSize) << highestVirtualSpaceBit;
-        dataPointer = reinterpret_cast<void *>(mmapedAddress | controlBits);
     }
 
 private:
+    inline void init() noexcept
+    {
+        assert(sizeClass != 0);
+        if (!initialized)
+        {
+            metadata = static_cast<uint64_t *>(mmapImpl(pageSize));
+            std::memset(metadata, 0, pageSize);
+            initialized = true;
+        }
+    }
+
+private:
+    bool initialized{false};
+    uint64_t sizeClass{0};
     SpinLock lock_;
 
     uint64_t *metadata;
@@ -180,36 +214,25 @@ private:
     uint64_t popIndex{0};
 };
 
-template<typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-constexpr bool isPowerOf2(T value)
-{
-    if ((value & (value - 1)))
-    {
-        return false;
-    }
-    return true;
-}
-
-template<uint64_t sizeClass>
 class SmallObjectsRegistry
 {
-    static_assert(sizeClass <= pageSize / 2 && isPowerOf2(sizeClass));
-
 public:
-    SmallObjectsRegistry() noexcept : metadata(static_cast<uint64_t *>(mmapImpl(pageSize)))
+    SmallObjectsRegistry() noexcept = default;
+    SmallObjectsRegistry(uint64_t size) noexcept : sizeClass(size)
     {
-        std::memset(metadata, 0, pageSize);
-        std::memset(null, 0, sizeClass);
     }
 
     void push(void *dataPointer) noexcept
     {
-        dataPointer = getWorkingAddress(dataPointer);
+        init();
+
         std::memset(dataPointer, 0, sizeClass);
     }
 
     bool pop(void *&dataPointer) noexcept
     {
+        init();
+
         auto &&[cell, index] = findFreeCell(pageIndex);
         // XXX: no free objects
         // maybe add another metadata page here
@@ -232,13 +255,21 @@ public:
         }
 
         std::memset(dataPointer, 0xff, sizeClass);
-        uint64_t controlBits = (sizeClass << highestVirtualSpaceBit) | smallObjectMask;
-        dataPointer =
-            reinterpret_cast<void *>(reinterpret_cast<uint64_t>(dataPointer) | controlBits);
         return true;
     }
 
 private:
+    inline void init() noexcept
+    {
+        assert(sizeClass != 0);
+        if (!initialized)
+        {
+            metadata = static_cast<uint64_t *>(mmapImpl(pageSize));
+            std::memset(metadata, 0, pageSize);
+            initialized = true;
+        }
+    }
+
     std::pair<void *, uint64_t> findFreeCell(uint64_t hint) noexcept
     {
         uint64_t limit{hint};
@@ -263,6 +294,9 @@ private:
 
     void *findFreeCellInPage(uint64_t index) noexcept
     {
+        char null[sizeClass];
+        std::memset(null, 0, sizeClass);
+
         char *begin = reinterpret_cast<char *>(metadata[index]);
         char *end = begin + pageSize;
 
@@ -278,8 +312,105 @@ private:
     }
 
 private:
+    bool initialized{false};
+    uint64_t sizeClass{0};
+
     uint64_t *metadata;
     uint64_t pageIndex{0};
-
-    char null[sizeClass];
 };
+
+static auto createSmallObjectsRegistries()
+{
+    std::array<SmallObjectsRegistry, 9> registries;
+    for (uint64_t index{0}, size{smallObjectsSizeStart}; size <= smallObjectsSizeLimit;
+         ++index, size <<= 1)
+    {
+        registries[index] = SmallObjectsRegistry{size};
+    }
+    return registries;
+}
+
+static SmallObjectsRegistry &getSmallObjectsRegistry(size_t size)
+{
+    thread_local auto registries = createSmallObjectsRegistries();
+    uint64_t index{0};
+    for (; size != smallObjectsSizeStart; size >>= 1, ++index)
+        ;
+    return registries[index];
+}
+
+static auto createLargeObjectsRegistries()
+{
+    static constexpr uint64_t count = largeObjectsSizeLimit / largeObjectsSizeStart;
+    std::array<LargeObjectsRegistry, count> registries;
+    for (uint64_t index{0}, size{largeObjectsSizeStart}; index < count; ++index, size += pageSize)
+    {
+        registries[index] = std::move(LargeObjectsRegistry{size});
+    }
+    return registries;
+}
+
+static LargeObjectsRegistry &getLargeObjectsRegistry(size_t size)
+{
+    assert(isDivisibleBy<pageSize>(size));
+    static auto registries = createLargeObjectsRegistries();
+    return registries[size / pageSize - 1];
+}
+
+void *myMalloc(size_t size)
+{
+    void *ptr{nullptr};
+    if (size <= smallObjectsSizeLimit)
+    {
+        size = roundUpToNextPowerOf2(size);
+        auto &registry = getSmallObjectsRegistry(size);
+        assert(registry.pop(ptr));
+
+        uint64_t controlBits = (size << highestVirtualSpaceBit) | smallObjectMask;
+        ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+    }
+    else
+    {
+        size = getNextNearestDivisibleByPageSize(size);
+
+        if (size <= largeObjectsSizeLimit)
+        {
+            auto &registry = getLargeObjectsRegistry(size);
+            registry.pop(ptr);
+
+            uint64_t controlBits = (size / pageSize) << highestVirtualSpaceBit;
+            ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+        }
+        else
+        {
+            ptr = mmapImpl(pageSize + size);
+            *static_cast<uint64_t *>(ptr) = size;
+            ptr = static_cast<std::byte *>(ptr) + pageSize;
+        }
+    }
+    return ptr;
+}
+
+void myFree(void *ptr)
+{
+    uint64_t address = reinterpret_cast<uint64_t>(ptr);
+    size_t sizeClass = (address >> highestVirtualSpaceBit) & 0x7fff;
+
+    ptr = getWorkingAddress(ptr);
+
+    if (sizeClass <= smallObjectsSizeLimit)
+    {
+        auto &registry = getSmallObjectsRegistry(sizeClass);
+        registry.push(ptr);
+    }
+    else if (sizeClass != 0)
+    {
+        auto &registry = getLargeObjectsRegistry(sizeClass * pageSize);
+        registry.push(ptr);
+    }
+    else
+    {
+        ptr = static_cast<std::byte *>(ptr) - pageSize;
+        munmapImpl(ptr, *static_cast<uint64_t *>(ptr));
+    }
+}
