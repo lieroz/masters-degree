@@ -222,17 +222,33 @@ private:
     uint64_t sizeClass{0};
     SpinLock lock_;
 
-    uint64_t *metadata;
+    uint64_t *metadata{nullptr};
     uint64_t pushIndex{0};
     uint64_t popIndex{0};
 };
 
+// TODO: add memory free in destructor
 class SmallObjectsRegistry
 {
 public:
     SmallObjectsRegistry() noexcept = default;
-    SmallObjectsRegistry(uint64_t size) noexcept : sizeClass(size)
+    SmallObjectsRegistry(uint64_t size) noexcept : sizeClass(size) {}
+
+    ~SmallObjectsRegistry()
     {
+        if (metadata != nullptr)
+        {
+            for (uint64_t cursor{0}; cursor < metadataLimit; ++cursor)
+            {
+                void *ptr =
+                    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(metadata)[cursor]);
+                if (ptr != nullptr)
+                {
+                    munmap(ptr, pageSize);
+                }
+            }
+            munmap(metadata, pageSize);
+        }
     }
 
     void push(void *dataPointer) noexcept
@@ -328,7 +344,7 @@ private:
     bool initialized{false};
     uint64_t sizeClass{0};
 
-    uint64_t *metadata;
+    uint64_t *metadata{nullptr};
     uint64_t pageIndex{0};
 };
 
