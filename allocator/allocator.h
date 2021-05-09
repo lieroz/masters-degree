@@ -347,7 +347,7 @@ static SmallObjectsRegistry &getSmallObjectsRegistry(size_t size)
 {
     thread_local auto registries = createSmallObjectsRegistries();
     uint64_t index{0};
-    for (; size != smallObjectsSizeStart; size >>= 1, ++index)
+    for (; size > smallObjectsSizeStart; size >>= 1, ++index)
         ;
     return registries[index];
 }
