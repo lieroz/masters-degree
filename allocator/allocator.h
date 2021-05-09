@@ -22,12 +22,25 @@ inline constexpr uint64_t largeObjectsSizeLimit = 1 << 20;              // 1MB
 inline constexpr uint64_t smallObjectMask = static_cast<uint64_t>(1) << 63;
 inline constexpr uint64_t highestVirtualSpaceBit = 48;  // without PAE in 64-bit mode
 
+// 0000000000000000 -> 00007fffffffffff => canonical low address space half
+// 00007fffffffffff -> ffff800000000000 => illegal addresses, unused
+// ffff800000000000 -> ffffffffffffffff => canonical high address space half
 template<typename T>
 T *getWorkingAddress(T *value)
 {
     static constexpr uint64_t workingAddressMask =
         (static_cast<uint64_t>(1) << highestVirtualSpaceBit) - 1;  // 0xffffffffffff
-    return reinterpret_cast<T *>(reinterpret_cast<uint64_t>(value) & workingAddressMask);
+    uint64_t address = reinterpret_cast<uint64_t>(value) & workingAddressMask;
+
+    if ((reinterpret_cast<uint64_t>(value) &
+            (static_cast<uint64_t>(1) << (highestVirtualSpaceBit - 1))) != 0)
+    {
+        static constexpr uint64_t highHalf = static_cast<uint64_t>(0x1ffff)  // 0b11111111111111111
+                                             << (highestVirtualSpaceBit - 1);
+        address |= highHalf;
+    }
+
+    return reinterpret_cast<T *>(address);
 }
 
 class SpinLock
