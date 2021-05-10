@@ -154,80 +154,8 @@ void munmapImpl(void *mmapedAddress, uint64_t size)
     assert(munmap(mmapedAddress, size) != -1 && std::strerror(errno));
 }
 
-// XXX: can be up to 268431360 bytes to encode in 16 bits
-// multiplied by page size
-class LargeObjectsRegistry
-{
-public:
-    LargeObjectsRegistry() noexcept = default;
-    LargeObjectsRegistry(uint64_t size) noexcept : sizeClass(size)
-    {
-        assert(sizeClass >= pageSize && isDivisibleBy<pageSize>(sizeClass));
-    }
-
-    void push(void *dataPointer) noexcept
-    {
-        LockGuard guard{lock_};
-        init();
-
-        if (pushIndex != metadataLimit)
-        {
-            metadata[pushIndex] = reinterpret_cast<uint64_t>(dataPointer);
-            popIndex = pushIndex++;
-        }
-        else
-        {
-            guard.unlock();
-            munmapImpl(dataPointer, sizeClass);
-        }
-    }
-
-    void pop(void *&dataPointer) noexcept
-    {
-        LockGuard guard{lock_};
-        init();
-
-        if (popIndex == 0 && metadata[popIndex] == 0)
-        {
-            guard.unlock();
-            dataPointer = mmapImpl(sizeClass);
-        }
-        else
-        {
-            pushIndex = popIndex;
-            dataPointer = reinterpret_cast<void *>(metadata[popIndex]);
-            metadata[popIndex] = 0;
-
-            if (popIndex != 0)
-            {
-                --popIndex;
-            }
-        }
-    }
-
-private:
-    inline void init() noexcept
-    {
-        assert(sizeClass != 0);
-        if (!initialized)
-        {
-            metadata = static_cast<uint64_t *>(mmapImpl(pageSize));
-            std::memset(metadata, 0, pageSize);
-            initialized = true;
-        }
-    }
-
-private:
-    bool initialized{false};
-    uint64_t sizeClass{0};
-    SpinLock lock_;
-
-    uint64_t *metadata{nullptr};
-    uint64_t pushIndex{0};
-    uint64_t popIndex{0};
-};
-
-// TODO: add memory free in destructor
+// XXX: allocator for small objects
+// which size is of power of 2 and up to 2048 bytes
 class SmallObjectsRegistry
 {
 public:
@@ -346,6 +274,79 @@ private:
 
     uint64_t *metadata{nullptr};
     uint64_t pageIndex{0};
+};
+
+// XXX: can be up to 268431360 bytes to encode in 16 bits
+// multiplied by page size
+class LargeObjectsRegistry
+{
+public:
+    LargeObjectsRegistry() noexcept = default;
+    LargeObjectsRegistry(uint64_t size) noexcept : sizeClass(size)
+    {
+        assert(sizeClass >= pageSize && isDivisibleBy<pageSize>(sizeClass));
+    }
+
+    void push(void *dataPointer) noexcept
+    {
+        LockGuard guard{lock_};
+        init();
+
+        if (pushIndex != metadataLimit)
+        {
+            metadata[pushIndex] = reinterpret_cast<uint64_t>(dataPointer);
+            popIndex = pushIndex++;
+        }
+        else
+        {
+            guard.unlock();
+            munmapImpl(dataPointer, sizeClass);
+        }
+    }
+
+    void pop(void *&dataPointer) noexcept
+    {
+        LockGuard guard{lock_};
+        init();
+
+        if (popIndex == 0 && metadata[popIndex] == 0)
+        {
+            guard.unlock();
+            dataPointer = mmapImpl(sizeClass);
+        }
+        else
+        {
+            pushIndex = popIndex;
+            dataPointer = reinterpret_cast<void *>(metadata[popIndex]);
+            metadata[popIndex] = 0;
+
+            if (popIndex != 0)
+            {
+                --popIndex;
+            }
+        }
+    }
+
+private:
+    inline void init() noexcept
+    {
+        assert(sizeClass != 0);
+        if (!initialized)
+        {
+            metadata = static_cast<uint64_t *>(mmapImpl(pageSize));
+            std::memset(metadata, 0, pageSize);
+            initialized = true;
+        }
+    }
+
+private:
+    bool initialized{false};
+    uint64_t sizeClass{0};
+    SpinLock lock_;
+
+    uint64_t *metadata{nullptr};
+    uint64_t pushIndex{0};
+    uint64_t popIndex{0};
 };
 
 static auto createSmallObjectsRegistries()
