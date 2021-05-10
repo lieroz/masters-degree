@@ -27,6 +27,25 @@
 
 Результатом запроса в распределитеть памяти является адрес, выровненный по размеру страницы и содержащий в себе всю необходимую информацию для освобождения объекта. После освобождения, память кэшируется в случае для малых и больших запросов. Память под огромные объекты, при освобождениии, сразу возвращается ОС.
 
+Для работы с возвращаемым адресом необходимо использовать функцию \textit{getWorkingAddress}, которая приводит старшие 16 бит к необходимому виду, чтобы не происходил доступ к закрытым адресам.
+
+\begin{lstlisting}
+template<typename T>
+T *getWorkingAddress(T *value)
+{
+	static constexpr uint64_t workingAddressMask = (static_cast<uint64_t>(1) << highestVirtualSpaceBit) - 1;
+	uint64_t address = reinterpret_cast<uint64_t>(value) & workingAddressMask;
+		
+	if ((reinterpret_cast<uint64_t>(value) & (static_cast<uint64_t>(1) << (highestVirtualSpaceBit - 1))) != 0)
+	{
+		static constexpr uint64_t highHalf = static_cast<uint64_t>(0x1ffff) << (highestVirtualSpaceBit - 1);
+		address |= highHalf;
+	}
+
+	return reinterpret_cast<T *>(address);
+}
+\end{lstlisting}
+
 \subsection{Основная идея}
 Метод основан на использовании старших бит виртуального адреса. На рисунке \ref{64bit-memory-addressing} показана диаграмма перевода виртульного адреса в физический в 64-ъ битной системе.
 
@@ -82,6 +101,51 @@
 		\label{large-allocator-design}
 	\end{center}
 \end{figure}
+
+Разграничение доступа к аллокатору из нескольких потоков осуществляется через спин лок, реализованный через атомарные примитивы, для каждого размерного класса есть свой спин лок.
+
+\begin{lstlisting}
+class SpinLock
+{
+	public:
+	SpinLock() noexcept = default;
+	SpinLock(const SpinLock &other) : lock_(other.lock_.load()) {}
+	SpinLock &operator=(const SpinLock &other)
+	{
+		lock_.store(other.lock_.load());
+		return *this;
+	}
+	
+	void lock() noexcept
+	{
+		for (;;)
+		{
+			if (!lock_.exchange(true, std::memory_order_acquire))
+			{
+				return;
+			}
+			while (lock_.load(std::memory_order_relaxed))
+			{
+				__builtin_ia32_pause();
+			}
+		}
+	}
+	
+	bool tryLock() noexcept
+	{
+		return !lock_.load(std::memory_order_relaxed) &&
+		!lock_.exchange(true, std::memory_order_acquire);
+	}
+	
+	void unlock() noexcept
+	{
+		lock_.store(false, std::memory_order_release);
+	}
+	
+	private:
+	std::atomic<bool> lock_{false};
+};
+\end{lstlisting}
 
 Реализация аллокатора похожа на реализацию аллокатора для малых объектов, за исключением того, что вместо малых объектов на страницу, в метаданных содержатся указатели на спаны, размер спана равен следующему значению кратному размеру страницы относительно запрашиваемого размера на выделение (только если тот уже не был кратен размеру страницы). В метаданных также могут одновременно находится указатели на 512 объектов определенного размерного класса, но каждый указатель теперь указывает на один объект, а не совокупность, поэтому реализация проще. Когда пользователь делает запрос на выделение памяти, он удовлетворяется по исходя из следующих шагов:
 \begin{itemize}
