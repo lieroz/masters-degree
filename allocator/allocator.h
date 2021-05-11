@@ -17,6 +17,7 @@ inline constexpr uint64_t smallObjectsSizeStart = 1 << 3;   // 8
 inline constexpr uint64_t smallObjectsSizeLimit = 1 << 11;  // 2KB
 
 inline constexpr uint64_t largeObjectsSizeStart = 1 << 12;              // 4KB
+// XXX: can't be more than 128MB to be encoded in 15 bits (127.99609375 MB)
 inline constexpr uint64_t largeObjectsSizeLimit = 1 << 20;              // 1MB
 
 inline constexpr uint64_t smallObjectMask = static_cast<uint64_t>(1) << 63;
@@ -276,7 +277,7 @@ private:
     uint64_t pageIndex{0};
 };
 
-// XXX: can be up to 268431360 bytes to encode in 16 bits
+// XXX: can be up to 134213632 bytes to encode in 15 bits
 // multiplied by page size
 class LargeObjectsRegistry
 {
@@ -405,6 +406,9 @@ void *myMalloc(size_t size)
 
         if (size <= largeObjectsSizeLimit)
         {
+            static constexpr uint64_t hardLimit = ((1 << 15) - 1) * pageSize;
+            assert(size <= hardLimit);
+
             auto &registry = getLargeObjectsRegistry(size);
             registry.pop(ptr);
 
