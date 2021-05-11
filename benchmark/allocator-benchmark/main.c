@@ -853,7 +853,7 @@ benchmark_run(int argc, char** argv) {
 		sprintf(filebuf, "benchmark-fixed-%u-%u-%s.txt",
 				(unsigned int)thread_count, (unsigned int)min_size,
 				benchmark_name());
-	fd = fopen(filebuf, "w+b");
+	fd = fopen(filebuf, "a+b");
 
 	size_t peak_allocated = get_process_peak_memory_usage();
 	double time_elapsed = timer_ticks_to_seconds(ticks);

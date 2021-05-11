@@ -7,7 +7,6 @@ RUN pacman --noconfirm -S \
     gcc \
     make \
     python \
-    bazel \
     autoconf \
     cmake \
     ninja
