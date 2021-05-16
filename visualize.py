@@ -46,12 +46,14 @@ for key in all_stats:
     jemalloc_ops = []
     mimalloc_ops = []
     rpmalloc_ops = []
+    # ops = []
 
     malloc_overhead = []
     tcmalloc_overhead = []
     jemalloc_overhead = []
     mimalloc_overhead = []
     rpmalloc_overhead = []
+    # overhead = []
 
     for stats in all_stats[key]:
         threads.append(stats['threads'])
@@ -61,6 +63,8 @@ for key in all_stats:
         jemalloc_ops.append(stats['jemalloc']['ops'])
         mimalloc_ops.append(stats['mimalloc']['ops'])
         rpmalloc_ops.append(stats['rpmalloc']['ops'])
+        # ops.append((malloc_ops[-1] + tcmalloc_ops[-1] + jemalloc_ops[-1] +
+        #     mimalloc_ops[-1] + rpmalloc_ops[-1]) / 5)
 
         malloc_overhead.append(100 * (stats['malloc']['usage'] - stats['malloc']['sample']) /
                 stats['malloc']['usage'])
@@ -72,6 +76,8 @@ for key in all_stats:
                 stats['mimalloc']['usage'])
         rpmalloc_overhead.append(100 * (stats['rpmalloc']['usage'] - stats['rpmalloc']['sample']) /
                 stats['rpmalloc']['usage'])
+        # overhead.append((malloc_overhead[-1] + tcmalloc_overhead[-1] +
+        #     jemalloc_overhead[-1] + mimalloc_overhead[-1] + rpmalloc_overhead[-1]) / 5)
 
     fig, ax = plt.subplots()
 
@@ -80,6 +86,7 @@ for key in all_stats:
     ax.plot(threads, jemalloc_ops, 'o-', label='jemalloc')
     ax.plot(threads, mimalloc_ops, 'o-', label='mimalloc')
     ax.plot(threads, rpmalloc_ops, 'o-', label='rpmalloc')
+    # ax.plot(threads, ops, 'o-', label='данный метод')
 
     ax.set_xticks(np.arange(min(threads), max(threads) + 1, 1))
     ax.ticklabel_format(style='plain')
@@ -98,6 +105,7 @@ for key in all_stats:
     ax.plot(threads, jemalloc_overhead, 'o-', label='jemalloc')
     ax.plot(threads, mimalloc_overhead, 'o-', label='mimalloc')
     ax.plot(threads, rpmalloc_overhead, 'o-', label='rpmalloc')
+    # ax.plot(threads, overhead, 'o-', label='данный метод')
 
     ax.set_xticks(np.arange(min(threads), max(threads) + 1, 1))
     ax.ticklabel_format(style='plain')
