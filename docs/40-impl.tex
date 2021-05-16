@@ -10,7 +10,95 @@
 \section{Входные и выходные параметры ПО}
 На вход подается рамер блока, который необходимо выделить. Размер может быть любым, если запрошено памяти больше чем есть в системе или метод отображения памяти вернул ошибку, аллокатор запишет ошибку в станрадтный поток вывода и завершит работу процесса. Выходным параметром является адрес, который содержит в себе метаданные об объекте.
 
-\section{Структура разработанного ПО}
-% CODE GOES HERE
+\section{Рекомендации к использованию ПО}
+Для разных типов объектов реализуются свои классы управления. Все операции с возвращаемой памятью должны проводиться через функцию \textit{getWorkingAddress}, которая имеет следующий вид:
 
-\section{Вывод}
+\begin{lstlisting}
+// 0000000000000000 -> 00007fffffffffff => canonical low address space half
+// 00007fffffffffff -> ffff800000000000 => illegal addresses, unused
+// ffff800000000000 -> ffffffffffffffff => canonical high address space half
+template<typename T>
+T *getWorkingAddress(T *value)
+{
+	static constexpr uint64_t workingAddressMask =
+		(static_cast<uint64_t>(1) << highestVirtualSpaceBit) - 1;
+	uint64_t address = reinterpret_cast<uint64_t>(value) & workingAddressMask;
+	
+	if ((reinterpret_cast<uint64_t>(value) &
+		(static_cast<uint64_t>(1) << (highestVirtualSpaceBit - 1))) != 0)
+	{
+		static constexpr uint64_t highHalf = static_cast<uint64_t>(0x1ffff)
+			<< (highestVirtualSpaceBit - 1);
+		address |= highHalf;
+	}
+	
+	return reinterpret_cast<T *>(address);
+}
+\end{lstlisting}
+
+Запрос на выделение использует функцию \textit{malloc} данной библиотеки:
+\begin{lstlisting}
+void *malloc(size_t size)
+{
+	void *ptr{nullptr};
+	if (size <= smallObjectsSizeLimit)
+	{
+		size = roundUpToNextPowerOf2(size);
+		auto &registry = getSmallObjectsRegistry(size);
+		assert(registry.pop(ptr));
+		
+		uint64_t controlBits = (size << highestVirtualSpaceBit) | smallObjectMask;
+		ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+	}
+	else
+	{
+		size = getNextNearestDivisibleByPageSize(size);
+		
+		if (size <= largeObjectsSizeLimit)
+		{
+			static constexpr uint64_t hardLimit = ((1 << 15) - 1) * pageSize;
+			assert(size <= hardLimit);
+			
+			auto &registry = getLargeObjectsRegistry(size);
+			registry.pop(ptr);
+			
+			uint64_t controlBits = (size / pageSize) << highestVirtualSpaceBit;
+			ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+		}
+		else
+		{
+			ptr = mmapImpl(pageSize + size);
+			*static_cast<uint64_t *>(ptr) = size;
+			ptr = static_cast<std::byte *>(ptr) + pageSize;
+		}
+	}
+	return ptr;
+}
+\end{lstlisting}
+
+Для освобождения блока памяти необходимо использовать функцию \textit{free}:
+\begin{lstlisting}
+void free(void *ptr)
+{
+	uint64_t address = reinterpret_cast<uint64_t>(ptr);
+	size_t sizeClass = (address >> highestVirtualSpaceBit) & 0x7fff;
+	
+	ptr = getWorkingAddress(ptr);
+	
+	if (sizeClass <= smallObjectsSizeLimit)
+	{
+		auto &registry = getSmallObjectsRegistry(sizeClass);
+		registry.push(ptr);
+	}
+	else if (sizeClass != 0)
+	{
+		auto &registry = getLargeObjectsRegistry(sizeClass * pageSize);
+		registry.push(ptr);
+	}
+	else
+	{
+		ptr = static_cast<std::byte *>(ptr) - pageSize;
+		munmapImpl(ptr, *static_cast<uint64_t *>(ptr));
+	}
+}
+\end{lstlisting}
