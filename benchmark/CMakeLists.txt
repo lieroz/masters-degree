@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.0)
 project(benchmark)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_BUILD_TYPE "Debug")
+set(CMAKE_CXX_FLAGS "-O2 -ggdb")
 
 add_executable(${PROJECT_NAME} main.cc thread.cc timer.cc)
 target_compile_options(${PROJECT_NAME} PRIVATE -fpermissive)

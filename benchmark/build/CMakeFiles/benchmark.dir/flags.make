@@ -6,5 +6,5 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/home/lieroz/masters-degree/benchmark
 
-CXX_FLAGS = -g -fpermissive -std=gnu++17
+CXX_FLAGS = -O2 -ggdb -fpermissive -std=gnu++17
 
