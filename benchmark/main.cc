@@ -347,8 +347,11 @@ benchmark_worker(void* argptr) {
 	benchmark_thread_initialize();
 
 	size_t pointers_size = sizeof(void*) * arg->alloc_count;
-	pointers = benchmark_malloc(16, pointers_size);
-	memset(pointers, 0, pointers_size);
+
+    void *pointersPtr = benchmark_malloc(16, pointers_size);
+    pointers = getWorkingAddress(pointersPtr);
+
+    memset(pointers, 0, pointers_size);
 	atomic_add32(&arg->allocated, (int32_t)pointers_size);
 
 	while (!benchmark_start)
@@ -373,22 +376,24 @@ benchmark_worker(void* argptr) {
 			const size_t alloc_op_count = num_alloc_ops[(iter + iloop) % alloc_ops_count];
 
 			for (iop = 0; iop < free_op_count; ++iop) {
-				if (pointers[free_idx]) {
-					allocated -= *(int32_t*)pointers[free_idx];
-					benchmark_free(pointers[free_idx]);
-					++arg->mops;
+                if (pointers[free_idx])
+                {
+                    allocated -= *(int32_t *)getWorkingAddress(pointers[free_idx]);
+                    benchmark_free(pointers[free_idx]);
+                    ++arg->mops;
 					pointers[free_idx] = 0;
-				}
+                }
 
-				free_idx = (free_idx + free_scatter) % arg->alloc_count;
-			}
+                free_idx = (free_idx + free_scatter) % arg->alloc_count;
+            }
 
 			while (foreign) {
 				int32_t foreign_allocated = 0;
 				for (iop = 0; iop < foreign->count; ++iop) {
-					foreign_allocated -= *(int32_t*)foreign->pointers[iop];
-					benchmark_free(foreign->pointers[iop]);
-					++arg->mops;
+                    auto *p = getWorkingAddress(foreign->pointers);
+                    foreign_allocated -= *(int32_t *)(getWorkingAddress(p[iop]));
+                    benchmark_free(p[iop]);
+                    ++arg->mops;
 				}
 
 				void* next = foreign->next;
@@ -402,8 +407,8 @@ benchmark_worker(void* argptr) {
 
 			for (iop = 0; iop < alloc_op_count; ++iop) {
 				if (pointers[alloc_idx]) {
-					allocated -= *(int32_t*)pointers[alloc_idx];
-					benchmark_free(pointers[alloc_idx]);
+                    allocated -= *(int32_t *)getWorkingAddress(pointers[alloc_idx]);
+                    benchmark_free(pointers[alloc_idx]);
 					++arg->mops;
 				}
 				size_t size = arg->min_size;
@@ -411,12 +416,13 @@ benchmark_worker(void* argptr) {
 					size = random_size_arr[(size_index + 2) % random_size_count];
 				pointers[alloc_idx] = benchmark_malloc((size < 4096) ? alignment[(size_index + iop) % 3] : 0, size);
 				//Make sure to write to each page to commit it for measuring memory usage
-				*(int32_t*)pointers[alloc_idx] = (int32_t)size;
-				size_t num_pages = (size - 1) / 4096;
+                void *addr = getWorkingAddress(pointers[alloc_idx]);
+                *(int32_t *)addr = (int32_t)size;
+                size_t num_pages = (size - 1) / 4096;
 				for (size_t page = 1; page < num_pages; ++page)
-					*((char*)(pointers[alloc_idx]) + (page * 4096)) = 1;
-				*((char*)(pointers[alloc_idx]) + (size - 1)) = 1;
-				allocated += (int32_t)size;
+                    *((char *)(addr) + (page * 4096)) = 1;
+                *((char *)(addr) + (size - 1)) = 1;
+                allocated += (int32_t)size;
 				++arg->mops;
 
 				alloc_idx = (alloc_idx + alloc_scatter) % arg->alloc_count;
@@ -426,23 +432,32 @@ benchmark_worker(void* argptr) {
 			foreign = 0;
 			if (arg->cross_rate && ((iloop % arg->cross_rate) == 0) && (do_foreign > 0)) {
 				foreign = benchmark_malloc(16, sizeof(thread_pointers));
-				foreign->count = alloc_op_count;
-				foreign->pointers = benchmark_malloc(16, sizeof(void*) * alloc_op_count);
-				foreign->allocated = &arg->allocated;
-				allocated += (int32_t)(alloc_op_count * sizeof(void*) + sizeof(thread_pointers));
+                auto *ptr = getWorkingAddress(foreign);
+
+                ptr->count = alloc_op_count;
+                ptr->pointers = benchmark_malloc(16, sizeof(void *) * alloc_op_count);
+
+                auto *ptrs = getWorkingAddress(ptr->pointers);
+
+                ptr->allocated = &arg->allocated;
+                allocated += (int32_t)(alloc_op_count * sizeof(void*) + sizeof(thread_pointers));
 				arg->mops += 2;
 
 				for (iop = 0; iop < alloc_op_count; ++iop) {
 					size_t size = arg->min_size;
 					if (arg->mode == MODE_RANDOM)
 						size = random_size_arr[(size_index + 2) % random_size_count];
-					foreign->pointers[iop] = benchmark_malloc((size < 4096) ? alignment[(size_index + iop) % 3] : 0, size);
-					*(int32_t*)foreign->pointers[iop] = (int32_t)size;
-					size_t num_pages = (size - 1) / 4096;
+                    ptrs[iop] = benchmark_malloc(
+                        (size < 4096) ? alignment[(size_index + iop) % 3] : 0, size);
+
+                    auto *ptrPtr = getWorkingAddress(ptrs[iop]);
+
+                    *(int32_t *)ptrPtr = (int32_t)size;
+                    size_t num_pages = (size - 1) / 4096;
 					for (size_t page = 1; page < num_pages; ++page)
-						*((char*)(foreign->pointers[iop]) + (page * 4096)) = 1;
-					*((char*)(foreign->pointers[iop]) + (size - 1)) = 1;
-					allocated += (int32_t)size;
+                        *((char *)(ptrPtr) + (page * 4096)) = 1;
+                    *((char *)(ptrPtr) + (size - 1)) = 1;
+                    allocated += (int32_t)size;
 					++arg->mops;
 
 					size_index = (size_index + 1) % random_size_count;
@@ -462,8 +477,8 @@ benchmark_worker(void* argptr) {
 				if ((arg->numthreads > 1) && (cross_index == arg->index))
 					cross_index = (cross_index + 1) % arg->numthreads;
 				benchmark_arg* cross_arg = &arg->args[cross_index];
-				put_cross_thread_memory(&cross_arg->foreign, foreign);
-				foreign = 0;
+                put_cross_thread_memory(&cross_arg->foreign, getWorkingAddress(foreign));
+                foreign = 0;
 			}
 
 			if (atomic_load32(&benchmark_threads_sync) > 0)
@@ -512,9 +527,10 @@ benchmark_worker(void* argptr) {
 				while (foreign) {
 					allocated = 0;
 					for (iop = 0; iop < foreign->count; ++iop) {
-						allocated -= *(int32_t*)foreign->pointers[iop];
-						benchmark_free(foreign->pointers[iop]);
-						++arg->mops;
+                        auto *p = getWorkingAddress(foreign->pointers);
+                        allocated -= *(int32_t *)getWorkingAddress(p[iop]);
+                        benchmark_free(p[iop]);
+                        ++arg->mops;
 					}
 
 					void* next = foreign->next;
@@ -537,8 +553,8 @@ benchmark_worker(void* argptr) {
 		tick_start = timer_current();
 		for (size_t iptr = 0; iptr < arg->alloc_count; ++iptr) {
 			if (pointers[iptr]) {
-				allocated -= *(int32_t*)pointers[iptr];
-				benchmark_free(pointers[iptr]);
+                allocated -= *(int32_t *)getWorkingAddress(pointers[iptr]);
+                benchmark_free(pointers[iptr]);
 				++arg->mops;
 				pointers[iptr] = 0;
 			}
@@ -604,10 +620,10 @@ benchmark_worker(void* argptr) {
 		thread_fence();
 	} while (atomic_load32(&benchmark_threads_sync));
 
-	benchmark_free(pointers);
-	atomic_add32(&arg->allocated, -(int32_t)pointers_size);
+    benchmark_free(pointersPtr);
+    atomic_add32(&arg->allocated, -(int32_t)pointers_size);
 
-	benchmark_thread_finalize();
+    benchmark_thread_finalize();
 
 	arg->accumulator += arg->mops;
 
@@ -717,10 +733,13 @@ benchmark_run(int argc, char** argv) {
 	benchmark_arg* arg;
 	uintptr_t* thread_handle;
 
-	arg = benchmark_malloc(0, sizeof(benchmark_arg) * thread_count);
-	thread_handle = benchmark_malloc(0, sizeof(thread_handle) * thread_count);
+    void *argPtr = benchmark_malloc(0, sizeof(benchmark_arg) * thread_count);
+    arg = getWorkingAddress(argPtr);
 
-	benchmark_start = 0;
+    void *threadPtr = benchmark_malloc(0, sizeof(thread_handle) * thread_count);
+    thread_handle = getWorkingAddress(threadPtr);
+
+    benchmark_start = 0;
 
 	if (mode == MODE_RANDOM)
 		printf("%-12s %u threads random %s size [%u,%u] %u loops %u allocs %u ops: ",
@@ -840,10 +859,10 @@ benchmark_run(int argc, char** argv) {
 	if (!ticks)
 		ticks = 1;
 
-	benchmark_free(thread_handle);
-	benchmark_free(arg);
+    benchmark_free(threadPtr);
+    benchmark_free(argPtr);
 
-	FILE* fd;
+    FILE* fd;
 	char filebuf[64];
 	if (mode == 0)
 		sprintf(filebuf, "benchmark-random-%u-%u-%u-%s.txt",

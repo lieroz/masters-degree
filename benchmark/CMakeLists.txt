@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.0)
-project(allocator-benchmark CXX C)
+project(benchmark)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_BUILD_TYPE "Release")
+set(CMAKE_BUILD_TYPE "Debug")
 
-add_executable(${PROJECT_NAME} main.c thread.c timer.c)
+add_executable(${PROJECT_NAME} main.cc thread.cc timer.cc)
 target_compile_options(${PROJECT_NAME} PRIVATE -fpermissive)
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(${PROJECT_NAME} pthread m)

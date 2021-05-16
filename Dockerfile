@@ -24,7 +24,7 @@ RUN git clone https://github.com/microsoft/mimalloc.git && \
 RUN git clone https://github.com/mjansson/rpmalloc.git && \
     cd rpmalloc && git checkout 1.4.2 && python3 configure.py --toolchain gcc && ninja
 
-COPY allocator-benchmark allocator-benchmark
+COPY benchmark benchmark
 COPY runall.sh runall.sh
 RUN chmod a+x runall.sh
 RUN cd allocator-benchmark && mkdir build && cd build && cmake .. && make -j

@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -rdynamic CMakeFiles/benchmark.dir/main.cc.o CMakeFiles/benchmark.dir/thread.cc.o CMakeFiles/benchmark.dir/timer.cc.o -o benchmark  -lpthread -lm 
