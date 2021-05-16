@@ -1,3 +1,0 @@
-/home/lieroz/masters-degree/benchmark/build/CMakeFiles/rebuild_cache.dir
-/home/lieroz/masters-degree/benchmark/build/CMakeFiles/edit_cache.dir
-/home/lieroz/masters-degree/benchmark/build/CMakeFiles/benchmark.dir
