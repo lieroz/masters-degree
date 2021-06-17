@@ -20,8 +20,8 @@ inline constexpr uint64_t largeObjectsSizeStart = 1 << 12;              // 4KB
 // XXX: can't be more than 128MB to be encoded in 15 bits (127.99609375 MB)
 inline constexpr uint64_t largeObjectsSizeLimit = 1 << 20;              // 1MB
 
-inline constexpr uint64_t smallObjectMask = static_cast<uint64_t>(1) << 63;
 inline constexpr uint64_t highestVirtualSpaceBit = 48;  // without PAE in 64-bit mode
+inline constexpr uint64_t workingAddressMask = (static_cast<uint64_t>(1) << highestVirtualSpaceBit) - 1;  // 0xffffffffffff
 
 // 0000000000000000 -> 00007fffffffffff => canonical low address space half
 // 00007fffffffffff -> ffff800000000000 => illegal addresses, unused
@@ -29,8 +29,6 @@ inline constexpr uint64_t highestVirtualSpaceBit = 48;  // without PAE in 64-bit
 template<typename T>
 T *getWorkingAddress(T *value)
 {
-    static constexpr uint64_t workingAddressMask =
-        (static_cast<uint64_t>(1) << highestVirtualSpaceBit) - 1;  // 0xffffffffffff
     uint64_t address = reinterpret_cast<uint64_t>(value) & workingAddressMask;
 
     if ((reinterpret_cast<uint64_t>(value) &
@@ -391,14 +389,15 @@ static LargeObjectsRegistry &getLargeObjectsRegistry(size_t size)
 void *myMalloc(size_t size)
 {
     void *ptr{nullptr};
+
     if (size <= smallObjectsSizeLimit)
     {
         size = roundUpToNextPowerOf2(size);
         auto &registry = getSmallObjectsRegistry(size);
         assert(registry.pop(ptr));
 
-        uint64_t controlBits = (size << highestVirtualSpaceBit) | smallObjectMask;
-        ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+        uint64_t controlBits = (size << highestVirtualSpaceBit);
+        ptr = reinterpret_cast<void *>((reinterpret_cast<uint64_t>(ptr) & workingAddressMask) | controlBits);
     }
     else
     {
@@ -413,7 +412,7 @@ void *myMalloc(size_t size)
             registry.pop(ptr);
 
             uint64_t controlBits = (size / pageSize) << highestVirtualSpaceBit;
-            ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+            ptr = reinterpret_cast<void *>((reinterpret_cast<uint64_t>(ptr) & workingAddressMask) | controlBits);
         }
         else
         {
