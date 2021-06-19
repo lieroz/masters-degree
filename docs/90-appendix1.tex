@@ -22,9 +22,8 @@ void *malloc(size_t size)
 		size = roundUpToNextPowerOf2(size);
 		auto &registry = getSmallObjectsRegistry(size);
 		assert(registry.pop(ptr));
-		
 		uint64_t controlBits = (size << highestVirtualSpaceBit) | smallObjectMask;
-		ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+		ptr = reinterpret_cast<void *>((reinterpret_cast<uint64_t>(ptr) & workingAddressMask) | controlBits);
 	}
 	else
 	{
@@ -34,12 +33,10 @@ void *malloc(size_t size)
 		{
 			static constexpr uint64_t hardLimit = ((1 << 15) - 1) * pageSize;
 			assert(size <= hardLimit);
-			
 			auto &registry = getLargeObjectsRegistry(size);
 			registry.pop(ptr);
-			
 			uint64_t controlBits = (size / pageSize) << highestVirtualSpaceBit;
-			ptr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) | controlBits);
+			ptr = reinterpret_cast<void *>((reinterpret_cast<uint64_t>(ptr) & workingAddressMask) | controlBits);
 		}
 		else
 		{
